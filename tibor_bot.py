@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import datetime as dt
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import requests
@@ -137,8 +138,15 @@ def normalize_ref_date(ref: str):
         return None
 
 
+def pct_to_bps(pct: str) -> str:
+    """'0.90627' (percent) -> '90.627' (basis points), trailing zeros trimmed."""
+    bps = (Decimal(pct) * 100).normalize()
+    # avoid exponent notation for whole numbers (e.g. 90.00000 -> 90, not 9E+1)
+    return format(bps, "f")
+
+
 def build_card(ref_date: str, rates, pdf_url: str, is_today: bool):
-    facts = [{"title": label, "value": f"{val}%"} for label, val in rates]
+    facts = [{"title": label, "value": f"{pct_to_bps(val)} bps"} for label, val in rates]
     subtitle = ("本日公表のレート" if is_today
                 else "※本日は新規公表なし。直近公表分を表示しています。")
     return {
@@ -189,7 +197,7 @@ def main() -> int:
     ref_date, rates = parse_pdf(tmp)
     log(f"reference date: {ref_date}")
     for label, val in rates:
-        log(f"  {label}: {val}%")
+        log(f"  {label}: {pct_to_bps(val)} bps  ({val}%)")
 
     ref = normalize_ref_date(ref_date)
     today = dt.datetime.now(JST).date()
