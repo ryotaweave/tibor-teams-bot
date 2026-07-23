@@ -1,0 +1,40 @@
+name: TIBOR Teams notifier
+
+on:
+  schedule:
+    # 09:30 UTC = 18:30 JST — ~1.5h after the ~17:00 JST publication, leaving
+    # margin for late publishing + GitHub's own cron delay. GitHub cron is
+    # UTC-only with no holiday awareness, so we run every weekday and the script
+    # skips days with no fresh publication (see the date guard in tibor_bot.py).
+    - cron: "30 9 * * 1-5"
+  workflow_dispatch:        # lets you run it manually from the Actions tab
+    inputs:
+      always_post:
+        description: "Post the latest available rate even if not published today"
+        type: boolean
+        default: false
+
+concurrency:
+  group: tibor-notify
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send TIBOR to Teams
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          ALWAYS_POST: ${{ inputs.always_post && '1' || '' }}
+        run: python tibor_bot.py
