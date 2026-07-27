@@ -73,18 +73,27 @@ Once that works, leave it alone — it runs automatically (see below).
 
 ---
 
-## Schedule
+## Schedule & de-duplication
 
-- Fires **weekdays at 09:30 UTC = 18:30 JST**, ~1.5h after the ~17:00 JST
-  publication.
-- GitHub cron is UTC-only and has no Japanese-holiday awareness, so it also
-  fires on holidays. The script guards against this: it only posts when the
-  PDF's latest row is dated **today (JST)**. On holidays / no-publish days the
-  latest row is stale, so it logs and exits **without posting** — no duplicate
-  or misleading messages.
-- To change the time, edit the `cron:` line in
-  [`.github/workflows/tibor.yml`](.github/workflows/tibor.yml). Note GitHub can
-  delay scheduled runs by a few (occasionally 15–30) minutes at peak times.
+GitHub's scheduled cron is **best-effort**: runs are frequently delayed by hours
+and are sometimes dropped entirely under load. So the bot does NOT depend on one
+punctual run:
+
+- It fires **several times each weekday evening** — `17 9,10,11,13 * * 1-5` UTC
+  (18:17 / 19:17 / 20:17 / 22:17 JST). Off-the-hour minutes (:17) get delayed
+  less than on-the-hour ones.
+- It **de-duplicates by rate date**: the last posted date is stored in
+  [`state/last_posted.txt`](state/last_posted.txt) (committed back to the repo by
+  the workflow). Each new rate is posted **exactly once**, whenever the first
+  successful run after publication sees it — even if that run is hours late.
+  Weekends/holidays produce no new date, so nothing is posted.
+- This replaced an earlier strict "post only if the rate is dated *today* (JST)"
+  check, which silently skipped fresh rates whenever GitHub delayed a run past
+  JST midnight.
+- To change timing, edit the `cron:` lines in
+  [`.github/workflows/tibor.yml`](.github/workflows/tibor.yml). A manual run
+  (Actions → Run workflow) with **always_post** ticked re-posts the latest rate
+  regardless of the de-dup state.
 
 ---
 
