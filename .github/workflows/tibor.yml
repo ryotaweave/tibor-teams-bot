@@ -2,17 +2,15 @@ name: TIBOR Teams notifier
 
 on:
   schedule:
-    # GitHub's scheduled cron is best-effort and often runs hours late (and can
-    # be dropped entirely under load), so we DON'T rely on a single punctual
-    # run. Instead we try several times through the JST evening; the script
-    # de-duplicates by rate date and posts each new rate exactly once.
-    # Minutes are off-the-hour (:17) because on-the-hour schedules are delayed
-    # the most. Times below are UTC — JST = UTC + 9h.
-    #   09:17 UTC = 18:17 JST   (target ~18:30)
-    #   10:17 UTC = 19:17 JST
-    #   11:17 UTC = 20:17 JST
-    #   13:17 UTC = 22:17 JST   (catch-up if earlier runs were dropped/delayed)
-    - cron: "17 9,10,11,13 * * 1-5"
+    # The PDF is finalised ~14:00–15:40 JST (observed over many days, latest
+    # ~15:39), so 16:00 JST is the earliest safe target. GitHub's cron is
+    # best-effort (often delayed, sometimes dropped), so besides the 16:00
+    # primary we add catch-ups; the script de-dups by rate date and posts each
+    # new rate exactly once. Times are UTC — JST = UTC + 9h.
+    - cron: "0 7 * * 1-5"     # 16:00 JST — primary, just after publication
+    - cron: "30 7 * * 1-5"    # 16:30 JST — catch-up
+    - cron: "30 8 * * 1-5"    # 17:30 JST — catch-up
+    - cron: "0 10 * * 1-5"    # 19:00 JST — safety net
   workflow_dispatch:        # lets you run it manually from the Actions tab
     inputs:
       always_post:

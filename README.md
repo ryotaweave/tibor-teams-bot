@@ -79,9 +79,10 @@ GitHub's scheduled cron is **best-effort**: runs are frequently delayed by hours
 and are sometimes dropped entirely under load. So the bot does NOT depend on one
 punctual run:
 
-- It fires **several times each weekday evening** — `17 9,10,11,13 * * 1-5` UTC
-  (18:17 / 19:17 / 20:17 / 22:17 JST). Off-the-hour minutes (:17) get delayed
-  less than on-the-hour ones.
+- The PDF is finalised **~14:00–15:40 JST** (measured from its `Last-Modified`
+  header over many days), so **16:00 JST is the earliest safe target**. It fires
+  at **16:00 JST (primary)** plus catch-ups at 16:30 / 17:30 / 19:00 JST —
+  `0 7`, `30 7`, `30 8`, `0 10` UTC on weekdays.
 - It **de-duplicates by rate date**: the last posted date is stored in
   [`state/last_posted.txt`](state/last_posted.txt) (committed back to the repo by
   the workflow). Each new rate is posted **exactly once**, whenever the first
