@@ -2,21 +2,30 @@ name: TIBOR Teams notifier
 
 on:
   schedule:
-    # 09:30 UTC = 18:30 JST — ~1.5h after the ~17:00 JST publication, leaving
-    # margin for late publishing + GitHub's own cron delay. GitHub cron is
-    # UTC-only with no holiday awareness, so we run every weekday and the script
-    # skips days with no fresh publication (see the date guard in tibor_bot.py).
-    - cron: "30 9 * * 1-5"
+    # GitHub's scheduled cron is best-effort and often runs hours late (and can
+    # be dropped entirely under load), so we DON'T rely on a single punctual
+    # run. Instead we try several times through the JST evening; the script
+    # de-duplicates by rate date and posts each new rate exactly once.
+    # Minutes are off-the-hour (:17) because on-the-hour schedules are delayed
+    # the most. Times below are UTC — JST = UTC + 9h.
+    #   09:17 UTC = 18:17 JST   (target ~18:30)
+    #   10:17 UTC = 19:17 JST
+    #   11:17 UTC = 20:17 JST
+    #   13:17 UTC = 22:17 JST   (catch-up if earlier runs were dropped/delayed)
+    - cron: "17 9,10,11,13 * * 1-5"
   workflow_dispatch:        # lets you run it manually from the Actions tab
     inputs:
       always_post:
-        description: "Post the latest available rate even if not published today"
+        description: "Post the latest available rate even if already posted"
         type: boolean
         default: false
 
 concurrency:
   group: tibor-notify
   cancel-in-progress: false
+
+permissions:
+  contents: write           # needed to commit the de-dup state file back
 
 jobs:
   notify:
@@ -37,4 +46,19 @@ jobs:
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           ALWAYS_POST: ${{ inputs.always_post && '1' || '' }}
+          STATE_FILE: state/last_posted.txt
         run: python tibor_bot.py
+
+      - name: Persist de-dup state
+        if: ${{ always() }}
+        run: |
+          if [ -n "$(git status --porcelain state/last_posted.txt)" ]; then
+            git config user.name "tibor-bot"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add state/last_posted.txt
+            git commit -m "chore: record last posted TIBOR date [skip ci]"
+            git push
+            echo "state updated and pushed"
+          else
+            echo "no state change to commit"
+          fi

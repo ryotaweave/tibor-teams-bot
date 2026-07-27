@@ -176,6 +176,22 @@ def build_card(ref_date: str, rates, pdf_url: str, is_today: bool):
     }
 
 
+def read_last_posted(path: str):
+    """Return the last successfully-posted rate date, or None."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            s = f.read().strip()
+        return dt.date.fromisoformat(s) if s else None
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def write_last_posted(path: str, d: dt.date) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(d.isoformat())
+
+
 def post_to_teams(webhook: str, card: dict) -> None:
     r = requests.post(webhook, json=card, timeout=30)
     # Power Automate returns 202; legacy connectors return 200.
@@ -203,20 +219,38 @@ def main() -> int:
     today = dt.datetime.now(JST).date()
     is_today = (ref == today)
 
-    if not is_today and not always_post:
-        log(f"latest row date {ref} != today {today}; nothing new to post. "
-            f"(set ALWAYS_POST=1 to override) — exiting without posting.")
+    # De-duplicate by the rate's own date, NOT by "is it today?". GitHub's cron
+    # is best-effort and often runs hours late (sometimes past JST midnight), so
+    # a strict "ref == today" check would wrongly skip a fresh rate. Instead we
+    # remember the last date we posted and post any strictly newer one exactly
+    # once — which also naturally skips weekends/holidays (no new date).
+    state_file = os.environ.get("STATE_FILE", "state/last_posted.txt")
+    last_posted = read_last_posted(state_file)
+    log(f"last posted date: {last_posted}")
+
+    if ref is None and not always_post:
+        log("WARNING: could not parse reference date; skipping to avoid duplicate posts.")
+        return 0
+
+    already_posted = (last_posted is not None and ref is not None and ref <= last_posted)
+    if already_posted and not always_post:
+        log(f"latest rate {ref} already posted (last was {last_posted}); "
+            f"nothing new — exiting without posting.")
         return 0
 
     card = build_card(ref_date, rates, pdf_url, is_today)
 
     if dry_run:
         import json
-        log("DRY RUN — not posting. Card payload:")
+        log(f"DRY RUN — would post (last posted: {last_posted}). Card payload:")
         print(json.dumps(card, ensure_ascii=False, indent=2))
         return 0
 
     post_to_teams(webhook, card)
+
+    if ref is not None:
+        write_last_posted(state_file, ref)
+        log(f"recorded last-posted date {ref} -> {state_file}")
     return 0
 
 
