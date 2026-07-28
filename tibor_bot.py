@@ -19,6 +19,7 @@ import re
 import sys
 import datetime as dt
 from decimal import Decimal
+from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 import requests
@@ -35,8 +36,14 @@ RATE_PAGE = "https://www.jbatibor.or.jp/rate/"
 BASE = "https://www.jbatibor.or.jp"
 JST = ZoneInfo("Asia/Tokyo")
 
-# Match the daily Japanese Yen TIBOR PDF, e.g. /rate/pdf/JAPANESEYENTIBOR260723.pdf
-PDF_LINK_RE = re.compile(r'(/rate/pdf/JAPANESEYENTIBOR\d{6}\.pdf)', re.IGNORECASE)
+# Match the daily Japanese Yen TIBOR PDF link, wherever it lives on the site.
+# JBA has moved this file before (was /rate/pdf/..., now /...), so we match the
+# href by filename and resolve it against the page URL — path-change proof.
+PDF_LINK_RE = re.compile(
+    r'href=["\']([^"\']*JAPANESEYENTIBOR\d{6}\.pdf)["\']', re.IGNORECASE)
+# Fallback: a bare URL/path anywhere in the HTML if it isn't in an href.
+PDF_URL_RE = re.compile(
+    r'((?:https?://[^\s"\'<>]+?)?/?JAPANESEYENTIBOR\d{6}\.pdf)', re.IGNORECASE)
 
 UA = {"User-Agent": "tibor-teams-bot/1.0 (+https://github.com/)"}
 
@@ -50,10 +57,12 @@ def find_pdf_url() -> str:
     r = requests.get(RATE_PAGE, headers=UA, timeout=30)
     r.raise_for_status()
     r.encoding = r.apparent_encoding or "utf-8"
-    m = PDF_LINK_RE.search(r.text)
+    m = PDF_LINK_RE.search(r.text) or PDF_URL_RE.search(r.text)
     if not m:
         raise RuntimeError("Could not find a JAPANESEYENTIBOR PDF link on the rate page.")
-    return BASE + m.group(1)
+    # Resolve relative or absolute hrefs against the page URL (handles both the
+    # old /rate/pdf/... layout and the new root-level one).
+    return urljoin(RATE_PAGE, m.group(1))
 
 
 def download_pdf(url: str, dest: str) -> str:
