@@ -2,18 +2,17 @@ name: TIBOR Teams notifier
 
 on:
   schedule:
-    # The PDF is finalised ~14:00–15:40 JST (observed over many days, latest
-    # ~15:39), so ~16:00 JST is the earliest safe target. GitHub's cron is
-    # best-effort (often hours late, sometimes dropped) — and schedules on the
-    # hour or at :30 are delayed the most, because that's what everyone picks,
-    # so these use odd minutes. The script de-dups by rate date, so extra
-    # attempts are free and each rate posts exactly once.
-    # Times are UTC — JST = UTC + 9h.
-    - cron: "7 7 * * 1-5"     # 16:07 JST — primary, just after publication
-    - cron: "38 7 * * 1-5"    # 16:38 JST — catch-up
-    - cron: "23 8 * * 1-5"    # 17:23 JST — catch-up
-    - cron: "51 9 * * 1-5"    # 18:51 JST — catch-up
-    - cron: "19 11 * * 1-5"   # 20:19 JST — safety net
+    # PRIMARY TRIGGER IS NOT HERE: the PC's Task Scheduler task
+    # "Bot - TIBOR to Teams" dispatches this workflow at 17:00 JST sharp, which
+    # is when the rate page reliably serves the current day's PDF (the file
+    # itself is stamped ~14:40–15:15 JST, but the page is cached for a while).
+    # GitHub's own cron is best-effort — routinely hours late — so it is kept
+    # only as a SAFETY NET for days the PC is off/asleep. Both paths share one
+    # de-dup record (state/last_posted.txt), so whichever runs first posts and
+    # the rest stay silent: exactly one Teams message per rate.
+    # Both slots are AFTER 17:00 JST on purpose, so a punctual cron can never
+    # pre-empt the PC's 17:00 post. Times are UTC — JST = UTC + 9h.
+    - cron: "23 8 * * 1-5"    # 17:23 JST — safety net if the PC missed 17:00
     - cron: "43 13 * * 1-5"   # 22:43 JST — last chance before JST midnight
   workflow_dispatch:        # lets you run it manually from the Actions tab
     inputs:

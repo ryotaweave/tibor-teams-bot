@@ -76,13 +76,19 @@ Once that works, leave it alone — it runs automatically (see below).
 ## Schedule & de-duplication
 
 GitHub's scheduled cron is **best-effort**: runs are frequently delayed by hours
-and are sometimes dropped entirely under load. So the bot does NOT depend on one
-punctual run:
+and are sometimes dropped entirely under load. So the punctual trigger lives on
+the PC and GitHub is only the backup:
 
-- The PDF is finalised **~14:00–15:40 JST** (measured from its `Last-Modified`
-  header over many days), so **16:00 JST is the earliest safe target**. It fires
-  at **16:00 JST (primary)** plus catch-ups at 16:30 / 17:30 / 19:00 JST —
-  `0 7`, `30 7`, `30 8`, `0 10` UTC on weekdays.
+- **Primary — 17:00 JST sharp, weekdays.** The Windows Task Scheduler task
+  **"Bot - TIBOR to Teams"** (`C:\Users\ryota\.bots\trigger-bot.ps1`) dispatches
+  this workflow; a dispatch starts within ~15s. 17:00 is used because the rate
+  **page** is cached and often still links yesterday's PDF at 16:00, even though
+  the file itself is stamped ~14:40–15:15 JST.
+- **Backup — GitHub cron**, 2 slots (`23 8`, `43 13` UTC = 17:23 / 22:43 JST),
+  for days the PC is off or asleep. Both are after 17:00 JST so a punctual cron
+  can never pre-empt the PC's post.
+- Only **one message per rate** reaches Teams: both paths share the same de-dup
+  record, so whichever runs first posts and the rest stay silent.
 - It **de-duplicates by rate date**: the last posted date is stored in
   [`state/last_posted.txt`](state/last_posted.txt) (committed back to the repo by
   the workflow). Each new rate is posted **exactly once**, whenever the first
