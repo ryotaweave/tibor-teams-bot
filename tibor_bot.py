@@ -50,6 +50,15 @@ PDF_URL_RE = re.compile(
 
 UA = {"User-Agent": "tibor-teams-bot/1.0 (+https://github.com/)"}
 
+# Chart palette: the validated categorical slots (blue, orange, aqua, yellow,
+# magenta) in FIXED order — assigned shortest tenor first so a tenor keeps its
+# colour between days. Text stays ink-coloured; only the marks carry identity.
+SERIES_COLOURS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]
+SURFACE = "#ffffff"
+INK = "#0b0b0b"
+INK_SOFT = "#52514e"
+GRID = "#d9d8d4"
+
 # Committed to the repo and served publicly to Teams; see chart_url().
 CHART_PATH = "charts/tibor_5d.png"
 HISTORY_PATH = "state/history.csv"
@@ -229,6 +238,7 @@ def build_chart(hist, out_path: str, days: int = 5):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import MultipleLocator
 
     dates = sorted(hist)[-days:]
     if not dates:
@@ -240,30 +250,52 @@ def build_chart(hist, out_path: str, days: int = 5):
     # Teams fixes the rendered width, so a LESS WIDE figure is what makes the
     # picture bigger: at the same on-screen width a 4:3 frame is much taller
     # than a 16:9 one, and every font grows relative to the figure.
-    fig, ax = plt.subplots(figsize=(6.2, 4.9), dpi=180)
+    fig, ax = plt.subplots(figsize=(6.3, 6.0), dpi=180)
+    fig.patch.set_facecolor(SURFACE)
+    ax.set_facecolor(SURFACE)
     x = list(range(len(dates)))
     labels = []
 
-    for t in tenors:
+    for i, t in enumerate(tenors):
         ys = [float(hist[d][t]) * 100 if hist[d].get(t) else None for d in dates]
-        pts = [(i, y) for i, y in zip(x, ys) if y is not None]
+        pts = [(j, y) for j, y in zip(x, ys) if y is not None]
         if not pts:
             continue
+        # Categorical hues in FIXED order (shortest tenor first), never cycled,
+        # so a tenor keeps its colour from one day's chart to the next.
+        colour = SERIES_COLOURS[i % len(SERIES_COLOURS)]
         ax.plot([p[0] for p in pts], [p[1] for p in pts],
-                marker="o", markersize=6.0, linewidth=2.6, label=_short_tenor(t))
+                color=colour, marker="o", markersize=6.0, linewidth=2.2,
+                # Surface ring: 3M and 12M sit within ~2bps, so their markers
+                # overlap; the ring keeps them readable as separate points.
+                markeredgecolor=SURFACE, markeredgewidth=1.4,
+                solid_capstyle="round", label=_short_tenor(t))
         first, last = pts[0][1], pts[-1][1]
         diff = last - first
         sign = "+" if diff > 0 else ""
         labels.append(f"{_short_tenor(t)} {last:.2f} ({sign}{diff:.2f})")
 
     ax.set_title("JBA Japanese Yen TIBOR\nlast %d business days" % len(dates),
-                 fontsize=16, pad=10)
-    ax.set_ylabel("bps", fontsize=14)
+                 fontsize=16, pad=12, color=INK)
+    ax.set_ylabel("bps", fontsize=14, color=INK_SOFT)
     ax.set_xticks(x)
     ax.set_xticklabels([d.strftime("%m/%d") for d in dates], fontsize=13)
-    ax.tick_params(axis="y", labelsize=13)
-    ax.grid(True, alpha=0.25, linewidth=0.8)
-    ax.margins(x=0.06, y=0.18)
+    ax.tick_params(axis="both", labelsize=13, colors=INK_SOFT, length=0)
+    ax.margins(x=0.07, y=0.10)
+
+    # Fine ticks: labelled majors every 10bps with a minor step between them, so
+    # a 2-3bps move is actually legible against the grid instead of looking flat.
+    step = 10 if (max(ax.get_ylim()) - min(ax.get_ylim())) > 45 else 5
+    ax.yaxis.set_major_locator(MultipleLocator(step))
+    ax.yaxis.set_minor_locator(MultipleLocator(step / 5.0))
+    # Solid hairlines, one shade off the surface — never dashed, never heavy.
+    ax.grid(which="major", color=GRID, linewidth=0.9, alpha=1.0)
+    ax.grid(which="minor", color=GRID, linewidth=0.6, alpha=0.45)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(GRID)
 
     # Legend below the axes: at this point count an in-plot legend collides
     # with the data. Labels carry the latest value and the change over the
@@ -271,15 +303,17 @@ def build_chart(hist, out_path: str, days: int = 5):
     # Wrapped to 3 columns — a single 5-wide row is wider than the plot, and
     # with bbox_inches="tight" that stretches the canvas and squashes the axes.
     handles, _ = ax.get_legend_handles_labels()
-    ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.11),
-              ncol=2, fontsize=12.5, frameon=False,
-              handlelength=1.6, columnspacing=1.2, labelspacing=0.5)
+    leg = ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.10),
+                    ncol=2, fontsize=12.5, frameon=False,
+                    handlelength=1.6, columnspacing=1.2, labelspacing=0.45)
+    for txt in leg.get_texts():          # identity is the swatch, not the text
+        txt.set_color(INK_SOFT)
 
     # Reserve the legend's space explicitly instead of tight_layout/bbox_inches,
     # so the axes keep the full width of the figure.
-    fig.subplots_adjust(left=0.14, right=0.97, top=0.87, bottom=0.26)
+    fig.subplots_adjust(left=0.14, right=0.97, top=0.88, bottom=0.235)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    fig.savefig(out_path, facecolor="white")
+    fig.savefig(out_path, facecolor=SURFACE)
     plt.close(fig)
 
     with open(out_path, "rb") as f:
