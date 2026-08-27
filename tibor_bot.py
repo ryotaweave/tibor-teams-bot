@@ -237,7 +237,10 @@ def build_chart(hist, out_path: str, days: int = 5):
 
     # Teams scales card images to ~450px wide, so what matters is font size
     # RELATIVE to figsize, not pixel count (lesson from the Nikkei VI chart).
-    fig, ax = plt.subplots(figsize=(7.2, 4.2), dpi=180)
+    # Teams fixes the rendered width, so a LESS WIDE figure is what makes the
+    # picture bigger: at the same on-screen width a 4:3 frame is much taller
+    # than a 16:9 one, and every font grows relative to the figure.
+    fig, ax = plt.subplots(figsize=(6.2, 4.9), dpi=180)
     x = list(range(len(dates)))
     labels = []
 
@@ -247,18 +250,18 @@ def build_chart(hist, out_path: str, days: int = 5):
         if not pts:
             continue
         ax.plot([p[0] for p in pts], [p[1] for p in pts],
-                marker="o", markersize=4.5, linewidth=2.0, label=_short_tenor(t))
+                marker="o", markersize=6.0, linewidth=2.6, label=_short_tenor(t))
         first, last = pts[0][1], pts[-1][1]
         diff = last - first
         sign = "+" if diff > 0 else ""
         labels.append(f"{_short_tenor(t)} {last:.2f} ({sign}{diff:.2f})")
 
-    ax.set_title("JBA Japanese Yen TIBOR - last %d business days" % len(dates),
-                 fontsize=14, pad=10)
-    ax.set_ylabel("bps", fontsize=12)
+    ax.set_title("JBA Japanese Yen TIBOR\nlast %d business days" % len(dates),
+                 fontsize=16, pad=10)
+    ax.set_ylabel("bps", fontsize=14)
     ax.set_xticks(x)
-    ax.set_xticklabels([d.strftime("%m/%d") for d in dates], fontsize=11)
-    ax.tick_params(axis="y", labelsize=11)
+    ax.set_xticklabels([d.strftime("%m/%d") for d in dates], fontsize=13)
+    ax.tick_params(axis="y", labelsize=13)
     ax.grid(True, alpha=0.25, linewidth=0.8)
     ax.margins(x=0.06, y=0.18)
 
@@ -268,13 +271,13 @@ def build_chart(hist, out_path: str, days: int = 5):
     # Wrapped to 3 columns — a single 5-wide row is wider than the plot, and
     # with bbox_inches="tight" that stretches the canvas and squashes the axes.
     handles, _ = ax.get_legend_handles_labels()
-    ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.13),
-              ncol=3, fontsize=10.5, frameon=False,
-              handlelength=1.6, columnspacing=1.4)
+    ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.11),
+              ncol=2, fontsize=12.5, frameon=False,
+              handlelength=1.6, columnspacing=1.2, labelspacing=0.5)
 
     # Reserve the legend's space explicitly instead of tight_layout/bbox_inches,
     # so the axes keep the full width of the figure.
-    fig.subplots_adjust(left=0.10, right=0.98, top=0.90, bottom=0.30)
+    fig.subplots_adjust(left=0.14, right=0.97, top=0.87, bottom=0.26)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     fig.savefig(out_path, facecolor="white")
     plt.close(fig)
