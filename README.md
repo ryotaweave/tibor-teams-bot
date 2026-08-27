@@ -108,9 +108,33 @@ the PC and GitHub is only the backup:
 
 | File | Purpose |
 |------|---------|
-| `tibor_bot.py` | Scrape → download → parse → post |
-| `requirements.txt` | `requests`, `pdfplumber`, `tzdata` (Windows) |
+| `tibor_bot.py` | Scrape → download → parse → chart → post |
+| `requirements.txt` | `requests`, `pdfplumber`, `matplotlib`, `tzdata` (Windows) |
 | `.github/workflows/tibor.yml` | Cron + manual-run workflow |
+| `state/history.csv` | Every published day's rates — feeds the chart |
+| `charts/tibor_5d.png` | The chart Teams displays (regenerated each post) |
+
+## The 5-business-day chart
+
+The card carries a line chart of the last 5 **published** days (weekends and
+holidays are simply absent from the history, so the x-axis never shows a flat
+weekend gap), plus each tenor's change vs the previous business day in the
+FactSet.
+
+- **Why this repo is public:** Teams renders card images only from a public URL.
+  Nothing sensitive is here — the webhook is a repo *secret*, and TIBOR rates are
+  published by JBA. Public repos also get unlimited Actions minutes.
+- **`state/history.csv` exists because the PDF only covers the current month.**
+  On Sep 1 the PDF holds one row; the CSV still has August, so the 5-day window
+  survives month boundaries. Each run merges the whole PDF into it.
+- **Ordering matters:** `--prepare` (parse, history, chart) → commit & push the
+  PNG → `--post`. Teams fetches the image the instant it renders, so posting
+  before the push would show a broken image.
+- The image URL is cache-busted on the PNG's **content hash**, not just the
+  date, or Teams/the raw CDN keep serving the previous picture.
+- Chart labels are ASCII (`1W`, `3M`) on purpose: the GitHub runner has no CJK
+  font, so Japanese would render as tofu boxes.
+- Window length is `CHART_DAYS` (default 5).
 
 ## Running locally (optional)
 
