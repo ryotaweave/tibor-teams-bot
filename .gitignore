@@ -3,3 +3,4 @@ tibor.pdf
 __pycache__/
 *.pyc
 .venv/
+tibor_meta.json
