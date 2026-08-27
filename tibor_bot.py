@@ -14,6 +14,9 @@ last business day, so by default we only post when the latest row's date is
 "today" in JST. Set ALWAYS_POST=1 to post the latest available row regardless.
 """
 
+import csv
+import hashlib
+import json
 import os
 import re
 import sys
@@ -46,6 +49,11 @@ PDF_URL_RE = re.compile(
     r'((?:https?://[^\s"\'<>]+?)?/?JAPANESEYENTIBOR\d{6}\.pdf)', re.IGNORECASE)
 
 UA = {"User-Agent": "tibor-teams-bot/1.0 (+https://github.com/)"}
+
+# Committed to the repo and served publicly to Teams; see chart_url().
+CHART_PATH = "charts/tibor_5d.png"
+HISTORY_PATH = "state/history.csv"
+CHART_DAYS = int(os.environ.get("CHART_DAYS", "5"))
 
 
 def log(msg: str) -> None:
@@ -89,11 +97,14 @@ def _pretty_tenor(label: str) -> str:
     return {"WEEK": f"{n}週間", "MONTH": f"{n}ヶ月", "YEAR": f"{n}年"}.get(unit, label)
 
 
-def parse_pdf(path: str):
+def parse_pdf_rows(path: str):
     """
-    Return (reference_date_str, [(tenor_label, rate_str), ...]) for the latest
-    published row. The table is borderless, so we align data numbers to header
-    labels by x-coordinate rather than trusting pdfplumber's cell detection.
+    Return [(date, [(raw_tenor, pct_str), ...]), ...] — newest first — for EVERY
+    populated row in the PDF. The file is named for a single day but holds the
+    whole month to date, which is what feeds the 5-business-day chart.
+
+    The table is borderless, so data numbers are aligned to their header label
+    by x-coordinate rather than trusting pdfplumber's cell detection.
     """
     with pdfplumber.open(path) as pdf:
         page = pdf.pages[0]
@@ -105,34 +116,37 @@ def parse_pdf(path: str):
         raise RuntimeError("Could not find any tenor header labels (e.g. 1MONTH).")
     headers.sort(key=lambda h: h[1])
 
-    # Dates in the first column; the latest published date sits at the top.
-    dates = sorted((w for w in words if DATE_RE.match(w["text"])),
-                   key=lambda w: w["top"])
-    if not dates:
+    date_words = [w for w in words if DATE_RE.match(w["text"])]
+    if not date_words:
         raise RuntimeError("No dates found in PDF (nothing published yet?).")
-    top_word = dates[0]
-    ref_date = top_word["text"]
+    rate_words = [w for w in words if RATE_RE.match(w["text"])]
 
-    # Rate numbers on the same visual line as the latest date.
-    row_rates = sorted(
-        (w for w in words
-         if RATE_RE.match(w["text"]) and abs(w["top"] - top_word["top"]) < 3),
-        key=lambda w: w["x0"],
-    )
-    if not row_rates:
-        raise RuntimeError(f"No rate values found for {ref_date}.")
+    rows = []
+    for dw in date_words:
+        # Rate numbers sitting on the same visual line as this date.
+        line = [w for w in rate_words if abs(w["top"] - dw["top"]) < 3]
+        if not line:
+            continue
+        vals = []
+        for label, hx in headers:
+            best = min(line, key=lambda w: abs(w["x0"] - hx))
+            if abs(best["x0"] - hx) < 12:  # within a column width -> populated
+                vals.append((label, best["text"]))
+        d = normalize_ref_date(dw["text"])
+        if d and vals:
+            rows.append((d, vals))
 
-    # Assign each rate to the nearest header column by left-edge distance.
-    rates = []
-    for label, hx in headers:
-        best = min(row_rates, key=lambda w: abs(w["x0"] - hx))
-        if abs(best["x0"] - hx) < 12:  # within a column width -> populated tenor
-            rates.append((_pretty_tenor(label), best["text"]))
-
-    if not rates:
+    if not rows:
         raise RuntimeError("Could not align any rates to tenor columns.")
 
-    return ref_date, rates
+    rows.sort(key=lambda r: r[0], reverse=True)
+    return rows
+
+
+def parse_pdf(path: str):
+    """Latest published row only: (reference_date_str, [(pretty_tenor, pct)])."""
+    d, vals = parse_pdf_rows(path)[0]
+    return d.strftime("%Y/%m/%d"), [(_pretty_tenor(t), v) for t, v in vals]
 
 
 def normalize_ref_date(ref: str):
@@ -154,10 +168,195 @@ def pct_to_bps(pct: str) -> str:
     return format(bps, "f")
 
 
-def build_card(ref_date: str, rates, pdf_url: str, is_today: bool):
-    facts = [{"title": label, "value": f"{pct_to_bps(val)} bps"} for label, val in rates]
+def _tenor_sort_key(t: str):
+    m = re.match(r"^(\d+)(WEEK|MONTH|YEAR)$", t)
+    if not m:
+        return (9, 0)
+    return ({"WEEK": 0, "MONTH": 1, "YEAR": 2}[m.group(2)], int(m.group(1)))
+
+
+def _short_tenor(t: str) -> str:
+    """1WEEK -> 1W, 3MONTH -> 3M. Chart labels must be ASCII: the GitHub runner
+    has no CJK font, so Japanese would render as tofu boxes."""
+    m = re.match(r"^(\d+)(WEEK|MONTH|YEAR)$", t)
+    return t if not m else m.group(1) + {"WEEK": "W", "MONTH": "M", "YEAR": "Y"}[m.group(2)]
+
+
+def read_history(path: str):
+    """{date: {raw_tenor: pct_str}} from the CSV, or {} if it isn't there yet."""
+    hist = {}
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                try:
+                    d = dt.date.fromisoformat((row.get("date") or "").strip())
+                except ValueError:
+                    continue
+                hist[d] = {k: v for k, v in row.items()
+                           if k != "date" and v not in (None, "")}
+    except FileNotFoundError:
+        pass
+    return hist
+
+
+def update_history(path: str, rows):
+    """Merge parsed PDF rows into the CSV and return the full history.
+
+    The PDF only covers the current month, so this file is what makes the
+    5-business-day window survive a month boundary (on Sep 1 the PDF has one
+    row, but August's rows are still here).
+    """
+    hist = read_history(path)
+    for d, vals in rows:
+        hist.setdefault(d, {}).update(dict(vals))
+    tenors = sorted({t for v in hist.values() for t in v}, key=_tenor_sort_key)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["date"] + tenors)
+        for d in sorted(hist):
+            w.writerow([d.isoformat()] + [hist[d].get(t, "") for t in tenors])
+    return hist
+
+
+def build_chart(hist, out_path: str, days: int = 5):
+    """Line chart of the last `days` published days, in bps. Returns (path, md5).
+
+    Only days actually present in the history are plotted, so weekends and
+    holidays are skipped automatically — the x-axis is categorical, not a
+    calendar, which also avoids flat gaps across a weekend.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    dates = sorted(hist)[-days:]
+    if not dates:
+        raise RuntimeError("No history to chart.")
+    tenors = sorted({t for d in dates for t in hist[d]}, key=_tenor_sort_key)
+
+    # Teams scales card images to ~450px wide, so what matters is font size
+    # RELATIVE to figsize, not pixel count (lesson from the Nikkei VI chart).
+    fig, ax = plt.subplots(figsize=(7.2, 4.2), dpi=180)
+    x = list(range(len(dates)))
+    labels = []
+
+    for t in tenors:
+        ys = [float(hist[d][t]) * 100 if hist[d].get(t) else None for d in dates]
+        pts = [(i, y) for i, y in zip(x, ys) if y is not None]
+        if not pts:
+            continue
+        ax.plot([p[0] for p in pts], [p[1] for p in pts],
+                marker="o", markersize=4.5, linewidth=2.0, label=_short_tenor(t))
+        first, last = pts[0][1], pts[-1][1]
+        diff = last - first
+        sign = "+" if diff > 0 else ""
+        labels.append(f"{_short_tenor(t)} {last:.2f} ({sign}{diff:.2f})")
+
+    ax.set_title("JBA Japanese Yen TIBOR - last %d business days" % len(dates),
+                 fontsize=14, pad=10)
+    ax.set_ylabel("bps", fontsize=12)
+    ax.set_xticks(x)
+    ax.set_xticklabels([d.strftime("%m/%d") for d in dates], fontsize=11)
+    ax.tick_params(axis="y", labelsize=11)
+    ax.grid(True, alpha=0.25, linewidth=0.8)
+    ax.margins(x=0.06, y=0.18)
+
+    # Legend below the axes: at this point count an in-plot legend collides
+    # with the data. Labels carry the latest value and the change over the
+    # window, so the card answers "up or down?" without reading the gridlines.
+    # Wrapped to 3 columns — a single 5-wide row is wider than the plot, and
+    # with bbox_inches="tight" that stretches the canvas and squashes the axes.
+    handles, _ = ax.get_legend_handles_labels()
+    ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.13),
+              ncol=3, fontsize=10.5, frameon=False,
+              handlelength=1.6, columnspacing=1.4)
+
+    # Reserve the legend's space explicitly instead of tight_layout/bbox_inches,
+    # so the axes keep the full width of the figure.
+    fig.subplots_adjust(left=0.10, right=0.98, top=0.90, bottom=0.30)
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    fig.savefig(out_path, facecolor="white")
+    plt.close(fig)
+
+    with open(out_path, "rb") as f:
+        digest = hashlib.md5(f.read()).hexdigest()[:10]
+    return out_path, digest
+
+
+def chart_url(digest: str, ref_date: str) -> str:
+    """Public raw URL for the committed chart.
+
+    Teams can only render card images from a PUBLIC url, which is why this repo
+    is public. The query string must be busted on the CONTENT hash, not just the
+    date — otherwise Teams and the raw CDN keep serving the previous picture
+    when a chart is regenerated for the same day.
+    """
+    repo = os.environ.get("CHART_REPO", "ryotaweave/tibor-teams-bot")
+    branch = os.environ.get("CHART_BRANCH", "master")
+    stamp = ref_date.replace("/", "")
+    return (f"https://raw.githubusercontent.com/{repo}/{branch}/{CHART_PATH}"
+            f"?v={stamp}-{digest}")
+
+
+def deltas_vs_previous(hist, ref: dt.date):
+    """{raw_tenor: change_in_bps} for `ref` vs the previous published day."""
+    days = sorted(d for d in hist if d <= ref)
+    if len(days) < 2:
+        return {}
+    cur, prev = hist[days[-1]], hist[days[-2]]
+    out = {}
+    for t, v in cur.items():
+        if t in prev:
+            try:
+                out[_pretty_tenor(t)] = (Decimal(v) - Decimal(prev[t])) * 100
+            except Exception:
+                pass
+    return out
+
+
+def build_card(ref_date: str, rates, pdf_url: str, is_today: bool,
+               img_url: str = None, deltas: dict = None):
+    deltas = deltas or {}
+
+    def fact_value(label, val):
+        text = f"{pct_to_bps(val)} bps"
+        d = deltas.get(label)
+        if d is None:
+            return text
+        if d > 0:
+            return f"{text}　▲ +{d.normalize():f}"
+        if d < 0:
+            return f"{text}　▼ {d.normalize():f}"
+        return f"{text}　→ 0"
+
+    facts = [{"title": label, "value": fact_value(label, val)}
+             for label, val in rates]
     subtitle = ("本日公表のレート" if is_today
                 else "※本日は新規公表なし。直近公表分を表示しています。")
+
+    body = [
+        {"type": "TextBlock", "size": "Large", "weight": "Bolder",
+         "text": "全銀協 日本円TIBOR（D-TIBOR）"},
+        {"type": "TextBlock", "spacing": "None", "isSubtle": True,
+         "wrap": True, "text": f"基準日: {ref_date}"},
+        {"type": "TextBlock", "spacing": "Small", "isSubtle": True,
+         "wrap": True, "text": subtitle + "（▲▼ は前営業日比 bps）"},
+        {"type": "FactSet", "facts": facts},
+    ]
+    actions = [{"type": "Action.OpenUrl", "title": "元のPDFを開く", "url": pdf_url}]
+
+    if img_url:
+        body.append({
+            "type": "Image", "url": img_url, "size": "Stretch",
+            "altText": "過去5営業日のD-TIBOR推移",
+            # Click-to-zoom: some Teams clients ignore an Image selectAction, so
+            # the button below is kept as a fallback.
+            "selectAction": {"type": "Action.OpenUrl", "url": img_url},
+        })
+        actions.append({"type": "Action.OpenUrl", "title": "グラフを拡大",
+                        "url": img_url})
+
     return {
         "type": "message",
         "attachments": [{
@@ -166,20 +365,8 @@ def build_card(ref_date: str, rates, pdf_url: str, is_today: bool):
                 "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                 "type": "AdaptiveCard",
                 "version": "1.4",
-                "body": [
-                    {"type": "TextBlock", "size": "Large", "weight": "Bolder",
-                     "text": "全銀協 日本円TIBOR（D-TIBOR）"},
-                    {"type": "TextBlock", "spacing": "None", "isSubtle": True,
-                     "wrap": True, "text": f"基準日: {ref_date}"},
-                    {"type": "TextBlock", "spacing": "Small", "isSubtle": True,
-                     "wrap": True, "text": subtitle},
-                    {"type": "FactSet", "facts": facts},
-                ],
-                "actions": [{
-                    "type": "Action.OpenUrl",
-                    "title": "元のPDFを開く",
-                    "url": pdf_url,
-                }],
+                "body": body,
+                "actions": actions,
             },
         }],
     }
@@ -209,58 +396,97 @@ def post_to_teams(webhook: str, card: dict) -> None:
     log(f"posted to Teams (HTTP {r.status_code})")
 
 
-def main() -> int:
-    webhook = os.environ.get("TEAMS_WEBHOOK_URL", "").strip()
-    always_post = os.environ.get("ALWAYS_POST", "").strip() in ("1", "true", "True")
-    dry_run = "--dry-run" in sys.argv or not webhook
+META_PATH = os.path.join(os.environ.get("RUNNER_TEMP", "."), "tibor_meta.json")
 
+
+def phase_prepare(always_post: bool, state_file: str) -> dict:
+    """Fetch + parse + update history, and draw the chart when there is a new
+    rate. Split from posting because the chart has to be committed and pushed
+    BEFORE the card is sent, or Teams renders a broken image."""
     pdf_url = find_pdf_url()
     log(f"pdf url: {pdf_url}")
     tmp = os.path.join(os.environ.get("RUNNER_TEMP", "."), "tibor.pdf")
     download_pdf(pdf_url, tmp)
 
-    ref_date, rates = parse_pdf(tmp)
-    log(f"reference date: {ref_date}")
+    rows = parse_pdf_rows(tmp)
+    ref, vals = rows[0]
+    ref_date = ref.strftime("%Y/%m/%d")
+    rates = [(_pretty_tenor(t), v) for t, v in vals]
+    log(f"reference date: {ref_date}  ({len(rows)} rows in this PDF)")
     for label, val in rates:
         log(f"  {label}: {pct_to_bps(val)} bps  ({val}%)")
 
-    ref = normalize_ref_date(ref_date)
-    today = dt.datetime.now(JST).date()
-    is_today = (ref == today)
+    hist = update_history(HISTORY_PATH, rows)
+    log(f"history: {len(hist)} published days -> {HISTORY_PATH}")
 
     # De-duplicate by the rate's own date, NOT by "is it today?". GitHub's cron
     # is best-effort and often runs hours late (sometimes past JST midnight), so
     # a strict "ref == today" check would wrongly skip a fresh rate. Instead we
     # remember the last date we posted and post any strictly newer one exactly
     # once — which also naturally skips weekends/holidays (no new date).
-    state_file = os.environ.get("STATE_FILE", "state/last_posted.txt")
     last_posted = read_last_posted(state_file)
     log(f"last posted date: {last_posted}")
+    is_new = bool(always_post or last_posted is None or ref > last_posted)
 
-    if ref is None and not always_post:
-        log("WARNING: could not parse reference date; skipping to avoid duplicate posts.")
+    meta = {
+        "ref": ref.isoformat(), "ref_date": ref_date, "pdf_url": pdf_url,
+        "rates": rates, "is_today": ref == dt.datetime.now(JST).date(),
+        "is_new": is_new, "img_url": None, "deltas": {},
+    }
+
+    if is_new:
+        _, digest = build_chart(hist, CHART_PATH, CHART_DAYS)
+        meta["img_url"] = chart_url(digest, ref_date)
+        meta["deltas"] = {k: str(v) for k, v in deltas_vs_previous(hist, ref).items()}
+        log(f"chart: {CHART_PATH} (md5 {digest})")
+    else:
+        log(f"rate {ref} already posted (last was {last_posted}) — "
+            f"chart not regenerated, nothing to publish.")
+
+    with open(META_PATH, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False)
+    return meta
+
+
+def phase_post(meta: dict, webhook: str, dry_run: bool, state_file: str) -> int:
+    if not meta.get("is_new"):
+        log("nothing new — exiting without posting.")
         return 0
 
-    already_posted = (last_posted is not None and ref is not None and ref <= last_posted)
-    if already_posted and not always_post:
-        log(f"latest rate {ref} already posted (last was {last_posted}); "
-            f"nothing new — exiting without posting.")
-        return 0
-
-    card = build_card(ref_date, rates, pdf_url, is_today)
+    deltas = {k: Decimal(v) for k, v in (meta.get("deltas") or {}).items()}
+    card = build_card(meta["ref_date"], meta["rates"], meta["pdf_url"],
+                      meta["is_today"], img_url=meta.get("img_url"),
+                      deltas=deltas)
 
     if dry_run:
-        import json
-        log(f"DRY RUN — would post (last posted: {last_posted}). Card payload:")
+        log("DRY RUN — not posting. Card payload:")
         print(json.dumps(card, ensure_ascii=False, indent=2))
         return 0
 
     post_to_teams(webhook, card)
-
-    if ref is not None:
-        write_last_posted(state_file, ref)
-        log(f"recorded last-posted date {ref} -> {state_file}")
+    write_last_posted(state_file, dt.date.fromisoformat(meta["ref"]))
+    log(f"recorded last-posted date {meta['ref']} -> {state_file}")
     return 0
+
+
+def main() -> int:
+    webhook = os.environ.get("TEAMS_WEBHOOK_URL", "").strip()
+    always_post = os.environ.get("ALWAYS_POST", "").strip() in ("1", "true", "True")
+    dry_run = "--dry-run" in sys.argv or not webhook
+    state_file = os.environ.get("STATE_FILE", "state/last_posted.txt")
+
+    do_prepare = "--prepare" in sys.argv
+    do_post = "--post" in sys.argv
+    if not do_prepare and not do_post:      # local/manual run: both phases
+        do_prepare = do_post = True
+
+    meta = phase_prepare(always_post, state_file) if do_prepare else None
+    if not do_post:
+        return 0
+    if meta is None:
+        with open(META_PATH, encoding="utf-8") as f:
+            meta = json.load(f)
+    return phase_post(meta, webhook, dry_run, state_file)
 
 
 if __name__ == "__main__":

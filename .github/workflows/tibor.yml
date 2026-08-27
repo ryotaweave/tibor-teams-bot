@@ -43,12 +43,35 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Phase 1 — fetch, parse, update history, draw the 5-business-day chart.
+      - name: Prepare (parse + chart)
+        env:
+          ALWAYS_POST: ${{ inputs.always_post && '1' || '' }}
+          STATE_FILE: state/last_posted.txt
+        run: python tibor_bot.py --prepare
+
+      # The chart must be pushed BEFORE the card is sent: Teams fetches the
+      # image the moment it renders, so posting first shows a broken image.
+      - name: Publish chart & history
+        run: |
+          if [ -n "$(git status --porcelain charts state/history.csv)" ]; then
+            git config user.name "tibor-bot"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add charts state/history.csv
+            git commit -m "chore: publish TIBOR chart + history [skip ci]"
+            git push
+            echo "chart/history published"
+          else
+            echo "no chart/history change"
+          fi
+
+      # Phase 2 — post the card, now that the image URL resolves publicly.
       - name: Send TIBOR to Teams
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           ALWAYS_POST: ${{ inputs.always_post && '1' || '' }}
           STATE_FILE: state/last_posted.txt
-        run: python tibor_bot.py
+        run: python tibor_bot.py --post
 
       - name: Persist de-dup state
         if: ${{ always() }}
