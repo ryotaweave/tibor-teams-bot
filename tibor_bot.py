@@ -170,11 +170,19 @@ def normalize_ref_date(ref: str):
         return None
 
 
+def fmt_bps(bps: Decimal) -> str:
+    """Render a bps Decimal with trailing zeros trimmed.
+
+    The card and the chart BOTH go through this, so the same number can never
+    appear as '+6.046' in one place and '+6.05' in the other.
+    """
+    # avoid exponent notation for whole numbers (e.g. 90.00000 -> 90, not 9E+1)
+    return format(bps.normalize(), "f")
+
+
 def pct_to_bps(pct: str) -> str:
     """'0.90627' (percent) -> '90.627' (basis points), trailing zeros trimmed."""
-    bps = (Decimal(pct) * 100).normalize()
-    # avoid exponent notation for whole numbers (e.g. 90.00000 -> 90, not 9E+1)
-    return format(bps, "f")
+    return fmt_bps(Decimal(pct) * 100)
 
 
 def _tenor_sort_key(t: str):
@@ -281,15 +289,24 @@ def build_chart(hist, out_path: str, days: int = 5):
     series = []          # (short_label, colour, [(x, y)…], legend_text)
     all_vals = []
     for i, t in enumerate(tenors):
+        days_with = [d for d in dates if hist[d].get(t)]
         pts = [(j, float(hist[d][t]) * 100)
                for j, d in enumerate(dates) if hist[d].get(t)]
         if not pts:
             continue
         colour = SERIES_COLOURS[i % len(SERIES_COLOURS)]
-        diff = pts[-1][1] - pts[0][1]
-        sign = "+" if diff > 0 else ""
-        series.append((_short_tenor(t), colour, pts,
-                       f"{_short_tenor(t)} {pts[-1][1]:.2f} ({sign}{diff:.2f})"))
+        # Legend quotes the change vs the PREVIOUS BUSINESS DAY — the same
+        # figure the card's FactSet shows. It used to quote the change across
+        # the whole window instead, which read as a contradiction: two
+        # parenthesised deltas, same look, different meaning.
+        # Computed in Decimal from the source strings, not from the plotted
+        # floats, so it can't drift by a float artefact either.
+        latest = Decimal(hist[days_with[-1]][t]) * 100
+        text = f"{_short_tenor(t)} {fmt_bps(latest)}"
+        if len(days_with) > 1:
+            diff = latest - Decimal(hist[days_with[-2]][t]) * 100
+            text += f" ({'+' if diff > 0 else ''}{fmt_bps(diff)})"
+        series.append((_short_tenor(t), colour, pts, text))
         all_vals += [p[1] for p in pts]
 
     if not series:
@@ -368,9 +385,12 @@ def build_chart(hist, out_path: str, days: int = 5):
     leg = axes[-1].legend(handles, [s[3] for s in series], loc="upper center",
                           bbox_to_anchor=(0.5, -0.30), ncol=2, fontsize=12.5,
                           frameon=False, handlelength=1.6, columnspacing=1.2,
-                          labelspacing=0.45)
+                          labelspacing=0.45,
+                          title="latest bps (change vs previous business day)")
     for txt in leg.get_texts():          # identity is the swatch, not the text
         txt.set_color(INK_SOFT)
+    leg.get_title().set_color(INK_SOFT)
+    leg.get_title().set_fontsize(11.5)
 
     # Reserve the legend's space explicitly instead of tight_layout/bbox_inches,
     # so the axes keep the full width of the figure.
