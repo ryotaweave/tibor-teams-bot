@@ -82,6 +82,38 @@ def find_pdf_url() -> str:
     return urljoin(RATE_PAGE, m.group(1))
 
 
+def probe_pdf_url(day: dt.date):
+    """URL of that day's PDF if it exists, else None. Tries both the current
+    root location and the legacy /rate/pdf/ one, since JBA has used each."""
+    for url in (f"{BASE}/JAPANESEYENTIBOR{day:%y%m%d}.pdf",
+                f"{BASE}/rate/pdf/JAPANESEYENTIBOR{day:%y%m%d}.pdf"):
+        try:
+            if requests.head(url, headers=UA, timeout=20,
+                             allow_redirects=True).status_code == 200:
+                return url
+        except requests.RequestException:
+            pass
+    return None
+
+
+def previous_month_pdf_url(ref: dt.date):
+    """The previous month's FINAL daily PDF, found by walking back from the last
+    day of that month until one exists (so weekends/holidays are skipped).
+
+    Each PDF only covers its own month, so on the first days of a month the
+    current file cannot fill a 5-day window — and if the history file is ever
+    lost or rolled back, nothing else could rebuild the tail. This is the
+    self-heal: one extra fetch, only when the current month is still short.
+    """
+    day = ref.replace(day=1) - dt.timedelta(days=1)
+    for _ in range(10):
+        url = probe_pdf_url(day)
+        if url:
+            return url
+        day -= dt.timedelta(days=1)
+    return None
+
+
 def download_pdf(url: str, dest: str) -> str:
     log(f"downloading {url}")
     r = requests.get(url, headers=UA, timeout=60)
@@ -531,6 +563,21 @@ def phase_prepare(always_post: bool, state_file: str) -> dict:
     rows = parse_pdf_rows(tmp)
     ref, vals = rows[0]
     ref_date = ref.strftime("%Y/%m/%d")
+
+    # A PDF covers only its own month, so early in a month it cannot fill the
+    # window on its own. Pull the previous month's final PDF as well — that also
+    # rebuilds the history file if it was ever truncated or rolled back.
+    if len(rows) < CHART_DAYS:
+        prev_url = previous_month_pdf_url(ref)
+        if prev_url:
+            prev_tmp = os.path.join(os.environ.get("RUNNER_TEMP", "."),
+                                    "tibor_prev.pdf")
+            download_pdf(prev_url, prev_tmp)
+            prev_rows = parse_pdf_rows(prev_tmp)
+            log(f"back-filled {len(prev_rows)} rows from the previous month")
+            rows = rows + prev_rows
+        else:
+            log("WARNING: previous month's PDF not found; window may be short.")
     rates = [(_pretty_tenor(t), v) for t, v in vals]
     log(f"reference date: {ref_date}  ({len(rows)} rows in this PDF)")
     for label, val in rates:

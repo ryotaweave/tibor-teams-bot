@@ -54,6 +54,16 @@ jobs:
       # image the moment it renders, so posting first shows a broken image.
       - name: Publish chart & history
         run: |
+          # History is append-only: the script merges, it never drops a day. A
+          # shrink means something outside the bot clobbered the file (it has
+          # happened — a stale local copy merged with `-X ours`), so fail loudly
+          # instead of committing the loss.
+          old=$(git show HEAD:state/history.csv 2>/dev/null | grep -c '^2' || echo 0)
+          new=$(grep -c '^2' state/history.csv || echo 0)
+          if [ "$new" -lt "$old" ]; then
+            echo "::error::history.csv shrank from $old to $new rows — refusing to publish"
+            exit 1
+          fi
           if [ -n "$(git status --porcelain charts state/history.csv)" ]; then
             git config user.name "tibor-bot"
             git config user.email "github-actions[bot]@users.noreply.github.com"
