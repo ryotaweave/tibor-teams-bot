@@ -228,12 +228,45 @@ def update_history(path: str, rows):
     return hist
 
 
+def _nice_step(span: float) -> float:
+    """A round tick step giving ~4-5 labelled lines across `span`."""
+    target = (span / 4.0) if span > 0 else 1.0
+    for s in (0.2, 0.5, 1.0, 2.0, 2.5, 5.0, 10.0, 20.0, 25.0, 50.0):
+        if target <= s:
+            return s
+    return 100.0
+
+
+def _split_bands(values, min_gap: float = 8.0):
+    """Group values into bands, splitting wherever there is an empty stretch.
+
+    TIBOR levels cluster (1W near 90, 1M near 117, the 3/6/12M pack near 150-166)
+    while daily moves are only a few bps, so a single axis spends most of its
+    height on empty space and every line looks flat. Splitting on the gaps lets
+    each cluster be drawn at its own zoom.
+    """
+    vals = sorted(values)
+    bands, cur = [], [vals[0]]
+    for v in vals[1:]:
+        if v - cur[-1] > min_gap:
+            bands.append(cur)
+            cur = [v]
+        else:
+            cur.append(v)
+    bands.append(cur)
+    return [(b[0], b[-1]) for b in bands]
+
+
 def build_chart(hist, out_path: str, days: int = 5):
     """Line chart of the last `days` published days, in bps. Returns (path, md5).
 
     Only days actually present in the history are plotted, so weekends and
     holidays are skipped automatically — the x-axis is categorical, not a
     calendar, which also avoids flat gaps across a weekend.
+
+    The y-axis is BROKEN across the empty stretches between rate clusters, so
+    each cluster is zoomed to its own range and a 2bps move is a visible step
+    rather than a flat line. Breaks are marked with the usual diagonal ticks.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -245,73 +278,103 @@ def build_chart(hist, out_path: str, days: int = 5):
         raise RuntimeError("No history to chart.")
     tenors = sorted({t for d in dates for t in hist[d]}, key=_tenor_sort_key)
 
-    # Teams scales card images to ~450px wide, so what matters is font size
-    # RELATIVE to figsize, not pixel count (lesson from the Nikkei VI chart).
-    # Teams fixes the rendered width, so a LESS WIDE figure is what makes the
-    # picture bigger: at the same on-screen width a 4:3 frame is much taller
-    # than a 16:9 one, and every font grows relative to the figure.
-    fig, ax = plt.subplots(figsize=(6.3, 6.0), dpi=180)
-    fig.patch.set_facecolor(SURFACE)
-    ax.set_facecolor(SURFACE)
-    x = list(range(len(dates)))
-    labels = []
-
+    series = []          # (short_label, colour, [(x, y)…], legend_text)
+    all_vals = []
     for i, t in enumerate(tenors):
-        ys = [float(hist[d][t]) * 100 if hist[d].get(t) else None for d in dates]
-        pts = [(j, y) for j, y in zip(x, ys) if y is not None]
+        pts = [(j, float(hist[d][t]) * 100)
+               for j, d in enumerate(dates) if hist[d].get(t)]
         if not pts:
             continue
-        # Categorical hues in FIXED order (shortest tenor first), never cycled,
-        # so a tenor keeps its colour from one day's chart to the next.
         colour = SERIES_COLOURS[i % len(SERIES_COLOURS)]
-        ax.plot([p[0] for p in pts], [p[1] for p in pts],
-                color=colour, marker="o", markersize=6.0, linewidth=2.2,
-                # Surface ring: 3M and 12M sit within ~2bps, so their markers
-                # overlap; the ring keeps them readable as separate points.
-                markeredgecolor=SURFACE, markeredgewidth=1.4,
-                solid_capstyle="round", label=_short_tenor(t))
-        first, last = pts[0][1], pts[-1][1]
-        diff = last - first
+        diff = pts[-1][1] - pts[0][1]
         sign = "+" if diff > 0 else ""
-        labels.append(f"{_short_tenor(t)} {last:.2f} ({sign}{diff:.2f})")
+        series.append((_short_tenor(t), colour, pts,
+                       f"{_short_tenor(t)} {pts[-1][1]:.2f} ({sign}{diff:.2f})"))
+        all_vals += [p[1] for p in pts]
 
-    ax.set_title("JBA Japanese Yen TIBOR\nlast %d business days" % len(dates),
-                 fontsize=16, pad=12, color=INK)
-    ax.set_ylabel("bps", fontsize=14, color=INK_SOFT)
-    ax.set_xticks(x)
-    ax.set_xticklabels([d.strftime("%m/%d") for d in dates], fontsize=13)
-    ax.tick_params(axis="both", labelsize=13, colors=INK_SOFT, length=0)
-    ax.margins(x=0.07, y=0.10)
+    if not series:
+        raise RuntimeError("No series to chart.")
 
-    # Fine ticks: labelled majors every 10bps with a minor step between them, so
-    # a 2-3bps move is actually legible against the grid instead of looking flat.
-    step = 10 if (max(ax.get_ylim()) - min(ax.get_ylim())) > 45 else 5
-    ax.yaxis.set_major_locator(MultipleLocator(step))
-    ax.yaxis.set_minor_locator(MultipleLocator(step / 5.0))
-    # Solid hairlines, one shade off the surface — never dashed, never heavy.
-    ax.grid(which="major", color=GRID, linewidth=0.9, alpha=1.0)
-    ax.grid(which="minor", color=GRID, linewidth=0.6, alpha=0.45)
-    ax.set_axisbelow(True)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color(GRID)
+    # Highest band first, so the panels read top-to-bottom like one y-axis.
+    bands = _split_bands(all_vals)[::-1]
+    # Pad each band, and give a dead-flat one (span 0) a usable window.
+    limits, spans = [], []
+    for lo, hi in bands:
+        span = hi - lo
+        pad = max(span * 0.28, 0.8)
+        limits.append((lo - pad, hi + pad))
+        spans.append((hi + pad) - (lo - pad))
 
-    # Legend below the axes: at this point count an in-plot legend collides
-    # with the data. Labels carry the latest value and the change over the
-    # window, so the card answers "up or down?" without reading the gridlines.
-    # Wrapped to 3 columns — a single 5-wide row is wider than the plot, and
-    # with bbox_inches="tight" that stretches the canvas and squashes the axes.
-    handles, _ = ax.get_legend_handles_labels()
-    leg = ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.10),
-                    ncol=2, fontsize=12.5, frameon=False,
-                    handlelength=1.6, columnspacing=1.2, labelspacing=0.45)
+    # Panel heights follow each band's range, so every panel shares one bps-per-
+    # pixel scale as far as possible — a 2bps move looks the same size anywhere.
+    # A floor keeps a flat single-value band from collapsing to a sliver.
+    ratios = [max(s, max(spans) * 0.22) for s in spans]
+
+    # Teams scales card images to ~450px wide, so what matters is font size
+    # RELATIVE to figsize, not pixel count (lesson from the Nikkei VI chart).
+    # A LESS WIDE figure is what makes the picture bigger on screen.
+    fig, axes = plt.subplots(len(bands), 1, figsize=(6.3, 6.2), dpi=180,
+                             sharex=True, height_ratios=ratios,
+                             gridspec_kw={"hspace": 0.10})
+    if len(bands) == 1:
+        axes = [axes]
+    fig.patch.set_facecolor(SURFACE)
+
+    x = list(range(len(dates)))
+    for ax, (ylo, yhi) in zip(axes, limits):
+        ax.set_facecolor(SURFACE)
+        for label, colour, pts, _ in series:
+            ax.plot([p[0] for p in pts], [p[1] for p in pts],
+                    color=colour, marker="o", markersize=6.0, linewidth=2.2,
+                    # Surface ring: 3M and 12M can sit ~2bps apart, so their
+                    # markers overlap; the ring keeps them readable.
+                    markeredgecolor=SURFACE, markeredgewidth=1.4,
+                    solid_capstyle="round", label=label)
+        ax.set_ylim(ylo, yhi)
+        ax.set_xlim(-0.35, len(dates) - 0.65)
+
+        step = _nice_step(yhi - ylo)
+        ax.yaxis.set_major_locator(MultipleLocator(step))
+        ax.yaxis.set_minor_locator(MultipleLocator(step / 5.0))
+        # Solid hairlines, one shade off the surface — never dashed, never heavy.
+        ax.grid(which="major", color=GRID, linewidth=0.9)
+        ax.grid(which="minor", color=GRID, linewidth=0.6, alpha=0.45)
+        ax.set_axisbelow(True)
+        ax.tick_params(axis="both", labelsize=12.5, colors=INK_SOFT, length=0)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        ax.spines["left"].set_color(GRID)
+        ax.spines["bottom"].set_color(GRID)
+
+    # Diagonal break marks on each seam, so the axis is never read as continuous.
+    brk = dict(marker=[(-1, -0.6), (1, 0.6)], markersize=7, linestyle="none",
+               color=INK_SOFT, mec=INK_SOFT, mew=1.2, clip_on=False)
+    for upper, lower in zip(axes[:-1], axes[1:]):
+        upper.spines["bottom"].set_visible(False)
+        upper.tick_params(axis="x", length=0)
+        lower.spines["top"].set_visible(False)
+        upper.plot([0, 1], [0, 0], transform=upper.transAxes, **brk)
+        lower.plot([0, 1], [1, 1], transform=lower.transAxes, **brk)
+
+    axes[0].set_title("JBA Japanese Yen TIBOR\nlast %d business days" % len(dates),
+                      fontsize=16, pad=12, color=INK)
+    axes[-1].set_xticks(x)
+    axes[-1].set_xticklabels([d.strftime("%m/%d") for d in dates], fontsize=13)
+    fig.supylabel("bps", fontsize=14, color=INK_SOFT, x=0.012)
+
+    # Legend under the bottom panel. Labels carry the latest value and the change
+    # over the window, so the exact bps move is readable as text as well.
+    handles, _ = axes[-1].get_legend_handles_labels()
+    leg = axes[-1].legend(handles, [s[3] for s in series], loc="upper center",
+                          bbox_to_anchor=(0.5, -0.30), ncol=2, fontsize=12.5,
+                          frameon=False, handlelength=1.6, columnspacing=1.2,
+                          labelspacing=0.45)
     for txt in leg.get_texts():          # identity is the swatch, not the text
         txt.set_color(INK_SOFT)
 
     # Reserve the legend's space explicitly instead of tight_layout/bbox_inches,
     # so the axes keep the full width of the figure.
-    fig.subplots_adjust(left=0.14, right=0.97, top=0.88, bottom=0.235)
+    fig.subplots_adjust(left=0.155, right=0.97, top=0.885, bottom=0.235)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     fig.savefig(out_path, facecolor=SURFACE)
     plt.close(fig)
