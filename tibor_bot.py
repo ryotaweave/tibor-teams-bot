@@ -471,31 +471,51 @@ def build_card(ref_date: str, rates, pdf_url: str, is_today: bool,
                img_url: str = None, deltas: dict = None):
     deltas = deltas or {}
 
-    def fact_value(label, val):
-        text = f"{pct_to_bps(val)} bps"
+    def delta_text(label):
+        """(text, Adaptive Card colour). Colours are theme tokens, not hex, so
+        they stay legible in Teams dark mode too."""
         d = deltas.get(label)
         if d is None:
-            return text
+            return "", "default"
         if d > 0:
-            return f"{text}　▲ +{d.normalize():f}"
+            return f"+{fmt_bps(d)}", "accent"       # blue
         if d < 0:
-            return f"{text}　▼ {d.normalize():f}"
-        return f"{text}　→ 0"
+            return f"{fmt_bps(d)}", "attention"     # red
+        return "±0", "default"
 
-    facts = [{"title": label, "value": fact_value(label, val)}
-             for label, val in rates]
     subtitle = ("本日公表のレート" if is_today
                 else "※本日は新規公表なし。直近公表分を表示しています。")
+
+    # A FactSet cannot colour individual values, so the rates are laid out as
+    # ColumnSets instead: tenor | rate | change, with the change tinted.
+    rows = []
+    for label, val in rates:
+        text, colour = delta_text(label)
+        rows.append({
+            "type": "ColumnSet",
+            "spacing": "Small",
+            "columns": [
+                {"type": "Column", "width": "auto", "verticalContentAlignment": "Center",
+                 "items": [{"type": "TextBlock", "text": label, "wrap": False,
+                            "isSubtle": True}]},
+                {"type": "Column", "width": "stretch", "verticalContentAlignment": "Center",
+                 "items": [{"type": "TextBlock", "text": f"{pct_to_bps(val)} bps",
+                            "horizontalAlignment": "Right", "weight": "Bolder"}]},
+                {"type": "Column", "width": "78px", "verticalContentAlignment": "Center",
+                 "items": [{"type": "TextBlock", "text": text, "color": colour,
+                            "horizontalAlignment": "Right", "weight": "Bolder"}]},
+            ],
+        })
 
     body = [
         {"type": "TextBlock", "size": "Large", "weight": "Bolder",
          "text": "全銀協 日本円TIBOR（D-TIBOR）"},
         {"type": "TextBlock", "spacing": "None", "isSubtle": True,
          "wrap": True, "text": f"基準日: {ref_date}"},
-        {"type": "TextBlock", "spacing": "Small", "isSubtle": True,
-         "wrap": True, "text": subtitle + "（▲▼ は前営業日比 bps）"},
-        {"type": "FactSet", "facts": facts},
-    ]
+        {"type": "TextBlock", "spacing": "Small", "isSubtle": True, "wrap": True,
+         "text": subtitle + "（右の数値は前営業日比 bps）"},
+    ] + rows
+
     actions = [{"type": "Action.OpenUrl", "title": "元のPDFを開く", "url": pdf_url}]
 
     if img_url:
