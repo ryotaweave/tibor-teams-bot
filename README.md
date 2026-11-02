@@ -118,8 +118,13 @@ the PC and GitHub is only the backup:
 
 The card carries a line chart of the last 5 **published** days (weekends and
 holidays are simply absent from the history, so the x-axis never shows a flat
-weekend gap), plus each tenor's change vs the previous business day in the
-FactSet.
+weekend gap), plus each tenor's change vs the previous business day, shown **blue when up,
+red when down** and `±0` when flat.
+
+The rates are laid out as `ColumnSet` rows (tenor | rate | change), not a
+`FactSet`: a FactSet cannot colour individual values. The colours are Adaptive
+Card theme tokens (`accent` / `attention`) rather than hex, so they stay legible
+in Teams dark mode. Triangles (▲▼) were dropped — the ▲ read as a minus sign.
 
 - **Why this repo is public:** Teams renders card images only from a public URL.
   Nothing sensitive is here — the webhook is a repo *secret*, and TIBOR rates are
